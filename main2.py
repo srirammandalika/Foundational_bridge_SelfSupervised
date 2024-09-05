@@ -7,12 +7,15 @@ import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from config import *
-from tasks.inpainting import run_inpainting_task
+from tasks.rotation import run_rotation_task  # Import rotation pretext task
 from models.main_task_net import MainTaskNet
 from utils.train_utils import train_model
 from utils.eval_utils import evaluate_model
 from datasets.main_task_dataset import MainTaskDataset
-from datasets.inpainting_dataset import InpaintingDataset
+from datasets.rotation_dataset import RotationDataset  # Use the new RotationDataset
+
+# Set the number of epochs to 2
+NUM_EPOCHS = 2
 
 def combine_datasets(*datasets):
     combined_images = []
@@ -38,6 +41,7 @@ def combine_datasets(*datasets):
     return combined_images, combined_labels
 
 def main():
+    # Load datasets
     bloodmnist = np.load(os.path.join(DATA_DIR, 'bloodmnist.npz'))
     pathmnist = np.load(os.path.join(DATA_DIR, 'pathmnist.npz'))
     bloodmnist_data = (bloodmnist['train_images'], bloodmnist['train_labels'].squeeze())
@@ -45,31 +49,41 @@ def main():
     combined_images, combined_labels = combine_datasets(bloodmnist_data, pathmnist_data)
     
     total_samples = len(combined_labels)
+    print(f"Total combined samples: {total_samples}")
+
+    # Split datasets
     pretext_size = int(0.65 * total_samples)
     train_size = int(0.25 * total_samples)
     val_test_size = total_samples - pretext_size - train_size
-    
+    print(f"Pretext size: {pretext_size}, Train size: {train_size}, Validation + Test size: {val_test_size}")
+
     dataset = list(zip(combined_images, combined_labels))
     pretext_dataset, remaining_dataset = random_split(dataset, [pretext_size, total_samples - pretext_size])
     train_dataset, val_test_dataset = random_split(remaining_dataset, [train_size, val_test_size])
     val_size = int(0.5 * val_test_size)
     test_size = val_test_size - val_size
     val_dataset, test_dataset = random_split(val_test_dataset, [val_size, test_size])
-    
+
+    print(f"Dataset sizes:\nPretext dataset: {len(pretext_dataset)}\nTrain dataset: {len(train_dataset)}\nValidation dataset: {len(val_dataset)}\nTest dataset: {len(test_dataset)}")
+
+    # Data transformations
     data_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[.5], std=[.5])
     ])
-
-    pretext_train_loader = DataLoader(InpaintingDataset(pretext_dataset, transform=data_transform), batch_size=BATCH_SIZE, shuffle=True)
+    
+    # Create DataLoaders
+    pretext_train_loader = DataLoader(RotationDataset(pretext_dataset, transform=data_transform), batch_size=BATCH_SIZE, shuffle=True)  # Rotation pretext dataset
     train_loader = DataLoader(MainTaskDataset(*zip(*train_dataset), transform=data_transform), batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(MainTaskDataset(*zip(*val_dataset), transform=data_transform), batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(MainTaskDataset(*zip(*test_dataset), transform=data_transform), batch_size=BATCH_SIZE, shuffle=False)
 
-    # Run 1: Train model_a on the pretext dataset
-    model_a = run_inpainting_task(pretext_train_loader, DEVICE)
+    # Run 1: Train model_a on the rotation pretext dataset
+    print("Training Model A on Rotation Pretext Dataset (starting from scratch)")
+    model_a = run_rotation_task(pretext_train_loader, DEVICE)
 
     # Run 2: Fine-tune model_b (from model_a) on the train dataset (25%)
+    print("Training Model B (fine-tuned from Model A) on Train Dataset")
     model_b = MainTaskNet(in_channels=3, num_classes=len(np.unique(combined_labels))).to(DEVICE)
     model_b.load_state_dict(model_a.state_dict(), strict=False)
     del model_a  # Delete model_a after transferring weights
@@ -85,6 +99,7 @@ def main():
     print(f'Test Accuracy: {accuracy_b_test:.2f}%')
 
     # Run 3: Train model_b2 (Model C) on 25% of the dataset
+    print("Training Model B2 (starting from scratch) on Train Dataset")
     model_b2 = MainTaskNet(in_channels=3, num_classes=len(np.unique(combined_labels))).to(DEVICE)
     model_b2 = train_model(model_b2, train_loader, num_epochs=NUM_EPOCHS, device=DEVICE)
 
@@ -98,9 +113,10 @@ def main():
     print(f'Test Accuracy: {accuracy_b2_test:.2f}%')
 
     # Run 4: Train model_b3 (Model C) on 95% of the dataset
+    print("Training Model B3 (starting from scratch) on Full Dataset (95%)")
     full_train_dataset, _ = random_split(dataset, [int(0.95 * total_samples), total_samples - int(0.95 * total_samples)])
     full_train_loader = DataLoader(MainTaskDataset(*zip(*full_train_dataset), transform=data_transform), batch_size=BATCH_SIZE, shuffle=True)
-    
+
     model_b3 = MainTaskNet(in_channels=3, num_classes=len(np.unique(combined_labels))).to(DEVICE)
     model_b3 = train_model(model_b3, full_train_loader, num_epochs=NUM_EPOCHS, device=DEVICE)
 
